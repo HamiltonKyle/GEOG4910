@@ -1,0 +1,246 @@
+var Tiger = ee.FeatureCollection("TIGER/2018/States"),
+    County = ee.FeatureCollection("TIGER/2018/Counties"),
+    L9SR = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2"),
+    L8SR = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2"),
+    L7SR = ee.ImageCollection("LANDSAT/LE07/C02/T1_L2"),
+    L5SR = ee.ImageCollection("LANDSAT/LT05/C02/T1_L2"),
+    DEM = ee.Image("USGS/3DEP/10m"),
+    MODIS = ee.ImageCollection("MODIS/061/MOD13Q1");
+
+/*  Landsat based yearly Cheatgrass density map
+  This script generates the cheatgrass density map for a selected year
+-R Douglas Ramsey (doug.ramsey@usu.edu)
+
+THIS IS A PARTIAL SCRIPT THAT CONTAINS ONLY THE PARTS THAT YOU HAVE NOT DONE BEFORE.
+JUST BELOW THIS, I HAVE PLACED IN COMMENTS THE PSEUDO-CODE (NUMBERED LIST BELOW WHERE YOU CAN FILL IN WITH THE NECESSARY CODE.
+I'VE ALSO NOTED IN THE SCRIPT WHERE TO PUT EACH STEP
+
+WHEREVER I HAVE <WORD>, REPLACE IT WITH THE APPROPRIATE VARIABLE (INCLUDING THE <>'S)
+
+1.  INSERT A FUNCTION TO MAP CLOUDS FOR LANDSAT C2L2T1 images
+2.  CREATE A FUNCTION TO CREATE AN NDVI LAYER FOR EACH IMAGE IN YOUR COLLECTION (I've added this for you)
+3.  CREATE A FUNCTION TO RENAME THE BANDS SO ALL LANDSAT SENSORS HAVE THE SAME BAND NAMES (I've added this for you)
+4.  CREATE A BAND RENAME LIST TO RENAME THE BANDS IN THE FUNCTION ABOVE
+5.  LOAD THE TIGER STATE BOUNDARY LAYER AND SELECT THE BOUNDARIES FOR UTAH AND NEVADA.
+6.  LOAD THE LANDSAT 5-9 IMAGE COLLECTIONS AND FILTER DATES, LOCATIONS, AND MAP THE FUNCTIONS ACROSS ALL IMAGES AND EXTRACT ONLY THE 'NDVI' LAYER
+7.  MERGE THE DIFFERENT COLLECTIONS INTO ONE LARGE COLLECTION AND SORT BY DATE
+8.  FROM THE MERGED COLLECTIONS EXTRACT THE SPRING AND SUMMER MONTHS AND PLACE THEM IN TWO DIFFERENT IMAGES USING max()
+9.  RUN THE SPRING AND SUMMER IMAGES THROUGH A "LONG-HAND' NORMALIZED DIFFERENCE FORMULA
+10. SET THE VISUALIZATION PARAMETERS, MAKE A PRETTY MAP, DISPLAY IT, AND MAKE A THUMBNAIL
+
+*/
+
+//***************************************************************************************************
+//******************** VARIABLES ********************************************************************
+//***************************************************************************************************
+//  This sets up the selection and renaming of bands so all images will have the same spectral bands
+var l89bands = ['SR_B2','SR_B3','SR_B4','SR_B5','SR_B6','SR_B7'];
+var l57bands = ['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5','SR_B7'];
+var renameTo = ['B','G','R','NIR','SWIR1','SWIR2'];
+
+//Specify the year to map
+var Year = 2001;
+
+
+//**********************************************************************************************
+//************************* FUNCTIONS **********************************************************
+//**********************************************************************************************
+// Cloud mask function
+// This example demonstrates the use of the Landsat 8 Collection 2, Level 2
+// QA_PIXEL band (CFMask) to mask unwanted pixels.
+
+function maskL8sr(image) {
+  // Bit 0 - Fill
+  // Bit 1 - Dilated Cloud
+  // Bit 2 - Cirrus
+  // Bit 3 - Cloud
+  // Bit 4 - Cloud Shadow
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  // Apply the scaling factors to the appropriate bands.
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  // Replace the original bands with the scaled ones and apply the masks.
+  return image.addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true)
+      .updateMask(qaMask)
+      .updateMask(saturationMask);
+}
+
+// NDVI Functions for L8 and L7 (the L7 function is used for L4&5)
+function addNDVI(image) {
+  var ndvi = image.normalizedDifference(["NIR","R"]).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+
+function renameL89(image){
+  return image.select(l89bands).rename(renameTo) 
+}
+
+function renameL57(image){
+  return image.select(l57bands).rename(renameTo)
+}
+
+//**********************************************************************************************
+//**************************** LOAD DATA *******************************************************
+//**********************************************************************************************
+// Load TIGER state boundaries and filter to Utah & Nevada.  Call this new featureCollection 'fc'.
+
+var fc = County.filter(ee.Filter.or(
+         ee.Filter.eq('STATEFP', '49'),ee.Filter.eq('STATEFP', '32'))); 
+
+//*****************Get the Image Collections and merge into one********************************
+// Load the Landsat ImageCollections.  Mask clouds filter for state bnd's rename the bands and add NDVI.
+//REPLACE THE <> WITH THE NAME OF YOUR FUNCTION
+var l9 = L9SR
+  .filter(ee.Filter.calendarRange(Year,Year,'year'))
+  .filterBounds(fc)
+  .map(maskL8sr)
+  .map(renameL89)
+  .map(addNDVI)
+  .select('NDVI')
+
+var l8 = L8SR
+  .filter(ee.Filter.calendarRange(Year,Year,'year'))
+  .filterBounds(fc)
+  .map(maskL8sr)
+  .map(renameL89)
+  .map(addNDVI)
+  .select('NDVI')
+
+// Load the Landsat 7 ImageCollection.  Mask clouds and add NDVI.
+var l7 = L7SR
+  .filter(ee.Filter.calendarRange(Year,Year,'year'))
+  .filterBounds(fc)
+  .map(maskL8sr)
+  .map(renameL57)
+  .map(addNDVI)
+  .select('NDVI')
+
+// Load the Landsat 5 ImageCollection.  Mask clouds and add NDVI.
+var l5 = L5SR
+  .filter(ee.Filter.calendarRange(Year,Year,'year'))
+  .filterBounds(fc)
+  .map(maskL8sr)
+  .map(renameL57)
+  .map(addNDVI)
+  .select('NDVI')
+
+// MERGE AND SORT THE IMAGE COLLECTIONS
+var Merged = l5.merge(l7).merge(l8).merge(l9).sort("system:time_start");
+//print(Merged.size())
+//**********************************************************************************************
+//**********************************************************************************************
+
+
+//**********************************************************************************************
+//*********************** GENERATE THE CHEATGRASS INDEX IMAGE **********************************
+//**********************************************************************************************
+//  EXTRACT THE SPRING AND SUMMER IMAGES INTO TWO SEPARATE IMAGE COLLECTIONS, REDUCE EACH TO AN 
+//  IMAGE AND CLIP TO THE STATE BOUNDARIES
+//any opeerator that takes to one image - mean, median, first, max, min etc.. median is good
+var spring =  Merged.filter(ee.Filter.calendarRange(4,5,'month')).median().clip(fc);
+var summer =  Merged.filter(ee.Filter.calendarRange(6,7,'month')).median().clip(fc);
+
+// CALCULATE THE CHEATGRASS INDEX
+var cheatgrass = ((spring.subtract(summer)).divide(spring.add(summer))).rename('Cheatgrass');
+
+//**********************************************************************************************
+//************************* SET VISUALIZATION PARAMETERS ***************************************
+//**********************************************************************************************
+var vizParams = {
+  min: -1,   
+  max: 1,
+//  palette: ['green','white','red'],
+  palette: ['006100','559400','ffbb00','ff1c00'], 
+  };
+Map.centerObject(fc,5);
+//**********************************************************************************************
+//**********************************************************************************************
+
+
+//**********************************************************************************************
+//***************** MAPPING SECTION ************************************************************
+//**********************************************************************************************
+// The output of the ee.Terrain.hillshade command is a gray-scale shaded relief with a dynamic range
+//  of 0-255 with low values being shaded areas and higher values sunlit.  I divide by 255 to convert
+//  the dymamic range to 0-1
+var HillShade = ee.Terrain.hillshade(DEM.clip(fc).multiply(4),135, 45).divide(255); //135az=SE, 315az=NW
+
+// Merge HillShade with colorized cheatgrass map to create a colored shaded relief with colors representing 
+// cheatgrass "intensity"
+var cheatgrassSHD = cheatgrass.visualize(vizParams).multiply(HillShade);
+
+//  I use the USGS National Land Cover Database to extract water and barren land covers so I can merge
+//  those with my map
+var NLCD = ee.Image('USGS/NLCD/NLCD2016').select('landcover').clip(fc);
+print(NLCD);
+var waterMask = NLCD.eq(11); // create a mask for water
+var barrenMask = NLCD.eq(31); // create a mask for barren lands
+// mask the NLCD to only show water and barren
+var Water = NLCD.mask(waterMask); 
+var Barren = NLCD.mask(barrenMask);
+
+//  ADD County Boundaries
+var Counties = County.filter(ee.Filter.or(
+         ee.Filter.eq('STATEFP', '49'),ee.Filter.eq('STATEFP', '32')));  //FIPS codes for Utah and Nevada
+// Convert the county vector layer into an outline image
+var boundary = ee.Image().toByte()
+    .paint(Counties, 'black', 1); // Outline using color black, width 1.
+
+// Blend the Shaded cheatgrass map with the water, barren, and then state boundaries.
+var shaded_water = cheatgrassSHD.visualize({gain:1.25})
+                    .blend(Water.visualize({palette: ['789BE2']}))
+                    .blend(Barren.visualize({palette: ['b3ac9f']}))
+                    .blend(boundary)
+
+//Map.addLayer(cheatgrass,vizParams,'Cheatgrass')
+Map.addLayer(shaded_water,{},'Shaded');
+
+
+//  Make a thumbnail image
+print(ui.Thumbnail(shaded_water, {
+    crs: 'EPSG:26912',
+    dimensions: [1375,1000],   //Calculated the aspect ratio of the longitude/latitude range which resulted in a width/height = 1.375. 1000 * 1375 to estimate width
+    format: 'png',
+    bbox:  [-120.01, 34.99,-109.04, 42.01] // for Utah only: [-114.06, 36.99,-109.04, 42.01]
+}));
+
+/*
+ANSWERS:
+Q1. LINKED
+
+Q2. The elevation dataset is a processed hillshade that takes the elevation data and converts it to a
+visualized representation. This is made using the single image called from the USGS dataset we call. 
+In order to clip the image, it has to be a single image as an image collection can't be clipped using the
+built in clip function. The landcover dataset is a series of images taken from the National Land Cover Database (NLCD).
+
+Q3. The elevation dataset has 1 band, elevation, that contains raster values that store elevation. 
+The landcover dataset has 1 band that contains landcover. Each value in the index corresponds to a type of landcover and is displayed in a raster on the image.
+
+Q4.
+Visualize() produces an image based off the inputs given. It can be greyscale or have RGB color bands. 
+It can also display a variety of gamma, gain, or bias values depending on what inputs are given.
+
+ee.Terrain.hillshade() takes a DEM and displays a hillshade image representing the visualization of the elevation. 
+The function takes in a range of values that can be represented as shaded or sunlit values in a range of 256 shades.
+
+mask() takes any values that match the input criteria and removes the data for any cells matching that value. 
+This can be used to redact any data that isn't relevant or doesn't meet the requirements for analysis.
+
+blend() overlays one image over another. It can use varying opacities to merge the 
+display of each image "blending" them together.
+
+ui.Thumbnail() creates a png from an image in the script. This can be specified to certain dimensions and exported as
+an image for use in reporting or professional presentation.
+
+Q5. The number 11 represents a landcover classe that corresponds to "Open Water".
+The number 31 corresponds to "Barren Land (Rock/Sand/Clay)". 
+These numbers specify that all cells of these values are to be removed from the map image.
+
+Q6. The projection was changed to a mercator projection. 'EPSG:26912'
+It uses UTM Zone 12 which is the appropriate zone for Utah, but Nevada begins to curve as it is outside of the zone boundary.
+*/
